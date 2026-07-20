@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const TIMEOUT_MS = 4500;
+const MAX_DEPTH = 3; // master playlist -> variant playlist -> segment
 const USER_AGENT = "Mozilla/5.0 (compatible; M3UPlayer/1.0)";
 
 interface ProbeResult {
@@ -12,6 +13,10 @@ interface ProbeResult {
 function isCorsPermitted(res: Response, origin: string): boolean {
   const acao = res.headers.get("access-control-allow-origin");
   return acao === "*" || acao === origin;
+}
+
+function looksLikeManifest(url: string): boolean {
+  return url.toLowerCase().split("?")[0].endsWith(".m3u8");
 }
 
 async function probe(url: string, origin: string, wantBody: boolean): Promise<ProbeResult> {
@@ -54,11 +59,10 @@ function firstResourceUri(manifestText: string, manifestUrl: string): string | n
 }
 
 // There's no proxy in front of playback anymore, so a channel only actually
-// plays if BOTH the manifest and the resource it points to (a segment or a
-// nested variant playlist) are reachable *and* send a permissive
-// Access-Control-Allow-Origin header -- hls.js fetches both straight from
-// the browser, so either one failing CORS breaks playback even though the
-// stream itself is technically "up".
+// plays if every hop hls.js would fetch -- master playlist, variant
+// playlist, and the first media segment -- is reachable, sends a permissive
+// Access-Control-Allow-Origin header, and isn't http:// on an https:// page
+// (mixed content, which browsers block outright regardless of CORS).
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get("url");
   if (!url) {
@@ -73,17 +77,37 @@ export async function GET(request: NextRequest) {
   }
 
   const origin = request.nextUrl.origin;
-  const manifest = await probe(parsed.toString(), origin, true);
+  const pageIsSecure = request.nextUrl.protocol === "https:";
 
-  if (!manifest.reachable || !manifest.corsOk) {
-    return NextResponse.json({ ok: false });
+  let currentUrl = parsed.toString();
+
+  for (let depth = 0; depth < MAX_DEPTH; depth++) {
+    if (pageIsSecure && new URL(currentUrl).protocol === "http:") {
+      return NextResponse.json({ ok: false, reason: "mixed-content" });
+    }
+
+    const wantBody = looksLikeManifest(currentUrl);
+    const result = await probe(currentUrl, origin, wantBody);
+
+    if (!result.reachable || !result.corsOk) {
+      return NextResponse.json({ ok: false });
+    }
+
+    const body = result.body?.trim() ?? "";
+    if (!wantBody || !body.startsWith("#EXTM3U")) {
+      // Reached an actual media segment (or a manifest URL that didn't turn
+      // out to be one) that's reachable and CORS-permitted -- good enough.
+      return NextResponse.json({ ok: true });
+    }
+
+    const nextUri = firstResourceUri(body, currentUrl);
+    if (!nextUri) {
+      // Manifest parsed but listed nothing playable -- treat what we've
+      // verified so far as the best available signal.
+      return NextResponse.json({ ok: true });
+    }
+    currentUrl = nextUri;
   }
 
-  const nextUri = manifest.body ? firstResourceUri(manifest.body, parsed.toString()) : null;
-  if (!nextUri) {
-    return NextResponse.json({ ok: true });
-  }
-
-  const segment = await probe(nextUri, origin, false);
-  return NextResponse.json({ ok: segment.reachable && segment.corsOk });
+  return NextResponse.json({ ok: true });
 }
