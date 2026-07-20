@@ -28,6 +28,8 @@ export default function AppShell() {
     isLoadingPlaylist,
     channelSourceOverride,
     setChannelSourceOverride,
+    favorites,
+    toggleFavorite,
   } = useAppState();
 
   // The URL is the single source of truth for the selected channel -- no
@@ -36,6 +38,7 @@ export default function AppShell() {
   const activeChannelId = searchParams.get("channel");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [onlyWorking, setOnlyWorking] = useState(false);
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
 
   const activeChannel: Channel | null = useMemo(
     () => channels.find((c) => c.id === activeChannelId) || null,
@@ -58,10 +61,11 @@ export default function AppShell() {
   const filteredChannels = useMemo(() => {
     let list = channels;
     if (selectedGroup) list = list.filter((c) => c.group === selectedGroup);
+    if (favoritesOnly) list = list.filter((c) => favorites.has(normalizeChannelName(c.name)));
     const q = searchQuery.trim().toLowerCase();
     if (q) list = list.filter((c) => c.name.toLowerCase().includes(q));
     return list;
-  }, [channels, selectedGroup, searchQuery]);
+  }, [channels, selectedGroup, favoritesOnly, favorites, searchQuery]);
 
   const selectChannel = useCallback(
     (channel: Channel) => {
@@ -128,6 +132,16 @@ export default function AppShell() {
         <label className="flex shrink-0 items-center gap-2 whitespace-nowrap text-sm text-neutral-300">
           <input
             type="checkbox"
+            checked={favoritesOnly}
+            onChange={(e) => setFavoritesOnly(e.target.checked)}
+            className="h-4 w-4 accent-yellow-400"
+          />
+          ★ Favoritos
+        </label>
+
+        <label className="flex shrink-0 items-center gap-2 whitespace-nowrap text-sm text-neutral-300">
+          <input
+            type="checkbox"
             checked={onlyWorking}
             onChange={(e) => setOnlyWorking(e.target.checked)}
             className="h-4 w-4 accent-red-600"
@@ -155,6 +169,8 @@ export default function AppShell() {
               onPickAnother={pickAnother}
               onNext={filteredChannels.length > 1 ? goToNextChannel : undefined}
               onPrev={filteredChannels.length > 1 ? goToPrevChannel : undefined}
+              isFavorite={channelKey ? favorites.has(channelKey) : false}
+              onToggleFavorite={channelKey ? () => toggleFavorite(channelKey) : undefined}
             />
 
             {activeChannel && channelSources.length > 1 && (
@@ -172,7 +188,7 @@ export default function AppShell() {
             <GridSkeleton />
           ) : (
             <ChannelGrid
-              key={`${activePlaylistId}:${selectedGroup ?? "all"}:${searchQuery}:${onlyWorking}`}
+              key={`${activePlaylistId}:${selectedGroup ?? "all"}:${searchQuery}:${onlyWorking}:${favoritesOnly}`}
               channels={filteredChannels}
               activeChannelId={activeChannelId}
               onSelect={selectChannel}

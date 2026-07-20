@@ -15,14 +15,15 @@ function resolvePlaybackUrl(url: string): string {
   return url;
 }
 
-// Retrying the same source uses growing delays instead of a fixed one, so a
-// server that's just momentarily overloaded gets more breathing room on
-// later attempts instead of being hammered at a constant rate.
+// Each source gets 4 attempts (growing delays, so a momentarily overloaded
+// server gets more breathing room on later tries) before moving to the next
+// source. Once every source has been tried, it loops back to the first and
+// keeps going -- retries never give up on their own; only the user picking
+// a different channel stops the cycle.
 const RETRY_DELAYS_MS = [800, 2000, 4000];
-const MAX_RETRIES_PER_SOURCE = RETRY_DELAYS_MS.length;
+const ATTEMPTS_PER_SOURCE = RETRY_DELAYS_MS.length + 1;
 const HLS_RECOVERY_DELAYS_MS = [500, 1500, 3000, 5000];
 const MAX_HLS_RECOVERIES = HLS_RECOVERY_DELAYS_MS.length;
-const FULL_RETRY_DELAY_MS = 6000;
 
 interface VideoPlayerProps {
   sources: ChannelSource[];
@@ -30,24 +31,33 @@ interface VideoPlayerProps {
   onPickAnother: () => void;
   onNext?: () => void;
   onPrev?: () => void;
+  isFavorite?: boolean;
+  onToggleFavorite?: () => void;
 }
 
-type PlayerStatus = "idle" | "loading" | "playing" | "buffering" | "error";
+type PlayerStatus = "idle" | "loading" | "playing" | "buffering";
 
 // `sources` is expected to change identity only when the user picks a new
 // channel or a different source for the same channel -- callers key this
 // component on that so retry/fallback state below always starts fresh.
-export default function VideoPlayer({ sources, live, onPickAnother, onNext, onPrev }: VideoPlayerProps) {
+export default function VideoPlayer({
+  sources,
+  live,
+  onPickAnother,
+  onNext,
+  onPrev,
+  isFavorite,
+  onToggleFavorite,
+}: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const usedFullRetryRef = useRef(false);
+  const cycleCountRef = useRef(0);
 
   const [sourceIndex, setSourceIndex] = useState(0);
   const [retryToken, setRetryToken] = useState(0);
   const [status, setStatus] = useState<PlayerStatus>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusNote, setStatusNote] = useState<string | null>(null);
   const [qualityLabel, setQualityLabel] = useState("Auto");
   const [isPlaying, setIsPlaying] = useState(false);
@@ -66,17 +76,17 @@ export default function VideoPlayer({ sources, live, onPickAnother, onNext, onPr
 
   const current: ChannelSource | null = sources[sourceIndex] ?? null;
 
-  // Sets up playback for the current source: retries it a few times with
-  // growing delays, then automatically advances to the next source (the
-  // same channel from a different list) if there is one. If every source
-  // fails, it takes one more full pass from the top before finally giving
-  // up -- covers a transient blip that took out every source at once.
+  // Sets up playback for the current source, retrying it up to
+  // ATTEMPTS_PER_SOURCE times before moving to the next source. Reaching
+  // the end of the list wraps back to the first -- this loop never stops on
+  // its own, so a channel that's merely having a bad minute keeps getting
+  // retried instead of dead-ending in an error screen.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !current || !browserSupportsHls) return;
 
     let cancelled = false;
-    let retries = 0;
+    let attempt = 0;
     let hlsRecoveries = 0;
 
     const cleanupHls = () => {
@@ -90,49 +100,35 @@ export default function VideoPlayer({ sources, live, onPickAnother, onNext, onPr
       if (cancelled) return;
       cleanupHls();
 
-      if (retries < MAX_RETRIES_PER_SOURCE) {
-        const delay = RETRY_DELAYS_MS[retries];
-        retries += 1;
-        setStatusNote(`Reintentando "${current.playlistName}" (intento ${retries + 1} de ${MAX_RETRIES_PER_SOURCE + 1})…`);
+      if (attempt < ATTEMPTS_PER_SOURCE) {
+        const delay = RETRY_DELAYS_MS[attempt - 1];
+        setStatusNote(`Reintentando "${current.playlistName}" (intento ${attempt + 1} de ${ATTEMPTS_PER_SOURCE})…`);
         setTimeout(() => {
           if (!cancelled) attemptPlayback();
         }, delay);
         return;
       }
 
-      if (sourceIndex + 1 < sources.length) {
-        const next = sources[sourceIndex + 1];
-        setStatusNote(`"${current.playlistName}" no respondió, probando "${next.playlistName}"…`);
-        setTimeout(() => {
-          if (!cancelled) setSourceIndex((i) => i + 1);
-        }, RETRY_DELAYS_MS[0]);
-        return;
-      }
-
-      if (!usedFullRetryRef.current) {
-        usedFullRetryRef.current = true;
-        setStatusNote("Ninguna fuente respondió, reintentando desde el principio…");
-        setTimeout(() => {
-          if (cancelled) return;
-          if (sourceIndex === 0) setRetryToken((t) => t + 1);
-          else setSourceIndex(0);
-        }, FULL_RETRY_DELAY_MS);
-        return;
-      }
-
-      setStatus("error");
-      setStatusNote(null);
-      setErrorMessage(
-        sources.length > 1
-          ? "Ninguna de las fuentes disponibles para este canal está funcionando ahora mismo."
-          : "Este canal no está disponible en este momento."
+      const nextIndex = (sourceIndex + 1) % sources.length;
+      const wrapping = nextIndex === 0;
+      if (wrapping) cycleCountRef.current += 1;
+      const next = sources[nextIndex];
+      setStatusNote(
+        wrapping
+          ? `Ninguna fuente respondió, reintentando desde el principio (vuelta ${cycleCountRef.current + 1})…`
+          : `"${current.playlistName}" no respondió, probando "${next.playlistName}"…`
       );
+      setTimeout(() => {
+        if (cancelled) return;
+        if (nextIndex === sourceIndex) setRetryToken((t) => t + 1);
+        else setSourceIndex(nextIndex);
+      }, RETRY_DELAYS_MS[0]);
     };
 
     const attemptPlayback = () => {
       if (cancelled) return;
+      attempt += 1;
       setStatus("loading");
-      setErrorMessage(null);
       setQualityLabel("Auto");
       cleanupHls();
 
@@ -268,12 +264,6 @@ export default function VideoPlayer({ sources, live, onPickAnother, onNext, onPr
     hideControlsTimer.current = setTimeout(() => setControlsVisible(false), 2800);
   }, []);
 
-  const retryFromStart = useCallback(() => {
-    usedFullRetryRef.current = false;
-    setSourceIndex(0);
-    setRetryToken((t) => t + 1);
-  }, []);
-
   if (!browserSupportsHls) {
     return (
       <div className="flex aspect-video w-full flex-col items-center justify-center gap-1 rounded-xl bg-neutral-900 px-6 text-center">
@@ -334,29 +324,6 @@ export default function VideoPlayer({ sources, live, onPickAnother, onNext, onPr
         </div>
       )}
 
-      {status === "error" && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/90 px-6 text-center">
-          <p className="text-lg font-medium text-white">{errorMessage}</p>
-          <p className="text-sm text-neutral-400">
-            Puedes reintentar, o elegir otro canal u otra lista si este stream sigue fallando.
-          </p>
-          <div className="mt-2 flex gap-3">
-            <button
-              onClick={retryFromStart}
-              className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-neutral-200"
-            >
-              Reintentar
-            </button>
-            <button
-              onClick={onPickAnother}
-              className="rounded-full bg-neutral-800 px-4 py-2 text-sm font-semibold text-white hover:bg-neutral-700"
-            >
-              Elegir otro canal
-            </button>
-          </div>
-        </div>
-      )}
-
       <div
         className={`absolute inset-x-0 bottom-0 flex items-center gap-3 bg-gradient-to-t from-black/90 to-transparent px-4 py-3 transition-opacity duration-200 ${
           controlsVisible || !isPlaying ? "opacity-100" : "opacity-0"
@@ -388,6 +355,16 @@ export default function VideoPlayer({ sources, live, onPickAnother, onNext, onPr
           className="h-1 w-20 accent-red-600"
           aria-label="Volumen"
         />
+
+        {onToggleFavorite && (
+          <button
+            onClick={onToggleFavorite}
+            aria-label={isFavorite ? "Quitar de favoritos" : "Agregar a favoritos"}
+            className={isFavorite ? "text-yellow-400" : "text-white hover:text-yellow-400"}
+          >
+            <StarIcon filled={Boolean(isFavorite)} />
+          </button>
+        )}
 
         {live && (
           <span className="flex items-center gap-1 rounded bg-red-600 px-2 py-0.5 text-xs font-bold text-white">
@@ -469,6 +446,17 @@ function NextIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" className="h-6 w-6">
       <path d="M16 6h2v12h-2zM6 18l8.5-6L6 6z" />
+    </svg>
+  );
+}
+function StarIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth={1.75} className="h-5 w-5">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M12 3.5l2.6 5.27 5.82.85-4.21 4.1.99 5.79L12 16.9l-5.2 2.61.99-5.79-4.21-4.1 5.82-.85z"
+      />
     </svg>
   );
 }

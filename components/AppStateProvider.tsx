@@ -1,14 +1,6 @@
 "use client";
 
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useReducer,
-  useState,
-} from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { Channel } from "@/types/channel";
 import {
@@ -21,6 +13,7 @@ import {
   type ContentType,
   type PlaylistSource,
 } from "@/lib/playlists";
+import { loadFavorites, saveFavorites } from "@/lib/favorites";
 
 const OVERRIDE_STORAGE_KEY = "m3u-player:channel-source-override";
 
@@ -33,10 +26,17 @@ interface State {
   playlistError: string | null;
   searchQuery: string;
   selectedGroup: string | null;
+  channelSourceOverride: Record<string, string>;
+  favorites: Set<string>;
 }
 
 type Action =
   | { type: "HYDRATE_PLAYLISTS"; playlists: PlaylistSource[] }
+  | {
+      type: "HYDRATE_EXTRAS";
+      channelSourceOverride: Record<string, string>;
+      favorites: Set<string>;
+    }
   | { type: "SET_SECTION"; section: ContentType; activeId: string | null }
   | { type: "SWITCH_PLAYLIST_START"; id: string }
   | { type: "SWITCH_PLAYLIST_DONE"; id: string; channels: Channel[] }
@@ -44,12 +44,32 @@ type Action =
   | { type: "ADD_PLAYLIST"; playlist: PlaylistSource; channels: Channel[] }
   | { type: "REMOVE_PLAYLIST"; id: string; fallbackId: string | null }
   | { type: "SET_SEARCH"; query: string }
-  | { type: "SET_GROUP"; group: string | null };
+  | { type: "SET_GROUP"; group: string | null }
+  | { type: "SET_CHANNEL_SOURCE_OVERRIDE"; channelKey: string; playlistId: string | null }
+  | { type: "TOGGLE_FAVORITE"; channelKey: string };
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "HYDRATE_PLAYLISTS":
       return { ...state, playlists: action.playlists };
+    case "HYDRATE_EXTRAS":
+      return {
+        ...state,
+        channelSourceOverride: action.channelSourceOverride,
+        favorites: action.favorites,
+      };
+    case "SET_CHANNEL_SOURCE_OVERRIDE": {
+      const next = { ...state.channelSourceOverride };
+      if (action.playlistId) next[action.channelKey] = action.playlistId;
+      else delete next[action.channelKey];
+      return { ...state, channelSourceOverride: next };
+    }
+    case "TOGGLE_FAVORITE": {
+      const next = new Set(state.favorites);
+      if (next.has(action.channelKey)) next.delete(action.channelKey);
+      else next.add(action.channelKey);
+      return { ...state, favorites: next };
+    }
     case "SET_SECTION":
       return {
         ...state,
@@ -137,6 +157,9 @@ interface AppStateValue {
 
   channelSourceOverride: Record<string, string>;
   setChannelSourceOverride: (channelKey: string, playlistId: string | null) => void;
+
+  favorites: Set<string>;
+  toggleFavorite: (channelKey: string) => void;
 }
 
 const AppStateContext = createContext<AppStateValue | null>(null);
@@ -179,11 +202,33 @@ export function AppStateProvider({
     playlistError: null,
     searchQuery: "",
     selectedGroup: null,
+    // Start empty (matching the server, which has no access to
+    // localStorage) and hydrate for real in the mount effect below --
+    // reading localStorage in the initial state would make the client's
+    // first render disagree with the server-rendered HTML and break
+    // hydration.
+    channelSourceOverride: {},
+    favorites: new Set<string>(),
   });
 
-  const [channelSourceOverride, setChannelSourceOverrideState] = useState<Record<string, string>>(
-    loadOverrideCache
-  );
+  // Guards the two persistence effects below so they don't fire with the
+  // still-empty initial state before the mount effect has read the real
+  // values from localStorage -- without this, that first (empty) write
+  // would clobber whatever was already saved from a previous visit.
+  const hydratedRef = useRef(false);
+
+  // Keep localStorage in sync with these two any time they change --
+  // synchronizing an external system with React state is exactly what
+  // effects are for.
+  useEffect(() => {
+    if (!hydratedRef.current || typeof window === "undefined") return;
+    window.localStorage.setItem(OVERRIDE_STORAGE_KEY, JSON.stringify(state.channelSourceOverride));
+  }, [state.channelSourceOverride]);
+
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    saveFavorites(state.favorites);
+  }, [state.favorites]);
 
   const switchPlaylistInternal = useCallback(async (source: PlaylistSource) => {
     dispatch({ type: "SWITCH_PLAYLIST_START", id: source.id });
@@ -199,10 +244,18 @@ export function AppStateProvider({
     }
   }, []);
 
-  // Hydrate saved playlists / active section+list from localStorage/URL once on mount.
+  // Hydrate saved playlists / active section+list / overrides / favorites
+  // from localStorage/URL once on mount (client-only, after the first paint
+  // matches the server).
   useEffect(() => {
     const playlists = loadStoredPlaylists();
     dispatch({ type: "HYDRATE_PLAYLISTS", playlists });
+    dispatch({
+      type: "HYDRATE_EXTRAS",
+      channelSourceOverride: loadOverrideCache(),
+      favorites: loadFavorites(),
+    });
+    hydratedRef.current = true;
 
     const section = (searchParams.get("section") as ContentType) || "tv";
     const listParam = searchParams.get("list");
@@ -330,15 +383,11 @@ export function AppStateProvider({
   }, []);
 
   const setChannelSourceOverride = useCallback((channelKey: string, playlistId: string | null) => {
-    setChannelSourceOverrideState((prev) => {
-      const next = { ...prev };
-      if (playlistId) next[channelKey] = playlistId;
-      else delete next[channelKey];
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem(OVERRIDE_STORAGE_KEY, JSON.stringify(next));
-      }
-      return next;
-    });
+    dispatch({ type: "SET_CHANNEL_SOURCE_OVERRIDE", channelKey, playlistId });
+  }, []);
+
+  const toggleFavorite = useCallback((channelKey: string) => {
+    dispatch({ type: "TOGGLE_FAVORITE", channelKey });
   }, []);
 
   const value = useMemo<AppStateValue>(() => {
@@ -363,8 +412,10 @@ export function AppStateProvider({
       removePlaylist,
       setSearchQuery,
       setSelectedGroup,
-      channelSourceOverride,
+      channelSourceOverride: state.channelSourceOverride,
       setChannelSourceOverride,
+      favorites: state.favorites,
+      toggleFavorite,
     };
   }, [
     state,
@@ -374,8 +425,8 @@ export function AppStateProvider({
     removePlaylist,
     setSearchQuery,
     setSelectedGroup,
-    channelSourceOverride,
     setChannelSourceOverride,
+    toggleFavorite,
   ]);
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;
