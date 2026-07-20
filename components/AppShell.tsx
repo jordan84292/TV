@@ -3,7 +3,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAppState } from "./AppStateProvider";
-import { DEFAULT_PLAYLIST, type ContentType } from "@/lib/playlists";
+import { DEFAULT_PLAYLIST } from "@/lib/playlists";
 import { normalizeChannelName, resolveChannelSources } from "@/lib/channelMatch";
 import type { Channel } from "@/types/channel";
 import Sidebar from "./Sidebar";
@@ -15,11 +15,9 @@ export default function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const {
-    section,
-    setSection,
     channels,
     channelsBySource,
-    sectionPlaylists,
+    playlists,
     activePlaylistId,
     searchQuery,
     setSearchQuery,
@@ -48,15 +46,15 @@ export default function AppShell() {
   const channelKey = activeChannel ? normalizeChannelName(activeChannel.name) : null;
 
   const channelSources = useMemo(() => {
-    if (!activeChannel || !activePlaylistId) return [];
+    if (!activeChannel) return [];
     return resolveChannelSources(
       activeChannel,
       activePlaylistId,
-      sectionPlaylists,
+      playlists,
       channelsBySource,
       channelKey ? channelSourceOverride[channelKey] : null
     );
-  }, [activeChannel, activePlaylistId, sectionPlaylists, channelsBySource, channelKey, channelSourceOverride]);
+  }, [activeChannel, activePlaylistId, playlists, channelsBySource, channelKey, channelSourceOverride]);
 
   const filteredChannels = useMemo(() => {
     let list = channels;
@@ -72,7 +70,7 @@ export default function AppShell() {
       const params = new URLSearchParams(searchParams.toString());
       params.set("channel", channel.id);
       if (activePlaylistId === DEFAULT_PLAYLIST.id) params.delete("list");
-      else if (activePlaylistId) params.set("list", activePlaylistId);
+      else params.set("list", activePlaylistId);
       router.push(`/?${params.toString()}`, { scroll: false });
     },
     [router, searchParams, activePlaylistId]
@@ -117,8 +115,6 @@ export default function AppShell() {
           <span className="rounded bg-red-600 px-1.5 py-0.5 text-sm">M3U</span>
           <span>Player</span>
         </div>
-
-        <SectionTabs section={section} onChange={setSection} />
 
         <div className="mx-auto w-full max-w-xl">
           <input
@@ -165,7 +161,7 @@ export default function AppShell() {
             <VideoPlayer
               key={`${activeChannel?.id ?? "none"}:${channelKey ? channelSourceOverride[channelKey] ?? "auto" : "auto"}`}
               sources={channelSources}
-              live={section === "tv"}
+              live
               onPickAnother={pickAnother}
               onNext={filteredChannels.length > 1 ? goToNextChannel : undefined}
               onPrev={filteredChannels.length > 1 ? goToPrevChannel : undefined}
@@ -182,9 +178,7 @@ export default function AppShell() {
             )}
           </div>
 
-          {sectionPlaylists.length === 0 ? (
-            <EmptySectionState section={section} />
-          ) : isLoadingPlaylist ? (
+          {isLoadingPlaylist ? (
             <GridSkeleton />
           ) : (
             <ChannelGrid
@@ -197,35 +191,6 @@ export default function AppShell() {
           )}
         </main>
       </div>
-    </div>
-  );
-}
-
-function SectionTabs({
-  section,
-  onChange,
-}: {
-  section: ContentType;
-  onChange: (section: ContentType) => void;
-}) {
-  return (
-    <div className="flex shrink-0 items-center gap-1 rounded-full bg-neutral-900 p-1">
-      <button
-        onClick={() => onChange("tv")}
-        className={`rounded-full px-3 py-1 text-sm font-medium transition-colors ${
-          section === "tv" ? "bg-red-600 text-white" : "text-neutral-400 hover:text-white"
-        }`}
-      >
-        TV
-      </button>
-      <button
-        onClick={() => onChange("vod")}
-        className={`rounded-full px-3 py-1 text-sm font-medium transition-colors ${
-          section === "vod" ? "bg-red-600 text-white" : "text-neutral-400 hover:text-white"
-        }`}
-      >
-        Películas y series
-      </button>
     </div>
   );
 }
@@ -263,20 +228,6 @@ function SourcePicker({
           usar automático
         </button>
       )}
-    </div>
-  );
-}
-
-function EmptySectionState({ section }: { section: ContentType }) {
-  return (
-    <div className="flex flex-col items-center justify-center gap-2 py-24 text-center text-neutral-500">
-      <p className="text-lg font-medium text-neutral-300">
-        {section === "tv" ? "Todavía no hay listas de TV" : "Todavía no hay listas de películas o series"}
-      </p>
-      <p className="max-w-sm text-sm">
-        Usá el selector de listas arriba a la derecha para agregar una URL .m3u o .m3u8
-        {section === "vod" ? " de películas/series." : "."}
-      </p>
     </div>
   );
 }

@@ -1,11 +1,9 @@
-export type ContentType = "tv" | "vod";
 export type PlaylistOrigin = "remote" | "local";
 
 export interface PlaylistSource {
   id: string;
   name: string;
   url: string;
-  contentType: ContentType;
   isDefault?: boolean;
   // "local" lists came from pasted/uploaded M3U text rather than a URL we
   // can re-fetch -- their channels live in localStorage instead (see
@@ -17,23 +15,18 @@ export const DEFAULT_PLAYLIST: PlaylistSource = {
   id: "iptv-org-spanish",
   name: "IPTV-ORG (global)",
   url: "https://iptv-org.github.io/iptv/languages/spa.m3u",
-  contentType: "tv",
   isDefault: true,
 };
 
 const STORAGE_KEY = "m3u-player:playlists";
-const ACTIVE_KEY_PREFIX = "m3u-player:active-playlist:";
+const ACTIVE_KEY = "m3u-player:active-playlist";
 
 export function loadStoredPlaylists(): PlaylistSource[] {
   if (typeof window === "undefined") return [DEFAULT_PLAYLIST];
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    const extra: (Omit<PlaylistSource, "contentType"> & { contentType?: ContentType })[] = raw
-      ? JSON.parse(raw)
-      : [];
-    // Older saved entries predate contentType -- treat them as TV.
-    const normalized: PlaylistSource[] = extra.map((p) => ({ ...p, contentType: p.contentType ?? "tv" }));
-    return [DEFAULT_PLAYLIST, ...normalized.filter((p) => p.id !== DEFAULT_PLAYLIST.id)];
+    const extra: PlaylistSource[] = raw ? JSON.parse(raw) : [];
+    return [DEFAULT_PLAYLIST, ...extra.filter((p) => p.id !== DEFAULT_PLAYLIST.id)];
   } catch {
     return [DEFAULT_PLAYLIST];
   }
@@ -45,18 +38,14 @@ export function saveStoredPlaylists(playlists: PlaylistSource[]): void {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(extra));
 }
 
-export function loadActivePlaylistId(section: ContentType): string | null {
-  if (typeof window === "undefined") {
-    return section === "tv" ? DEFAULT_PLAYLIST.id : null;
-  }
-  const stored = window.localStorage.getItem(ACTIVE_KEY_PREFIX + section);
-  if (stored) return stored;
-  return section === "tv" ? DEFAULT_PLAYLIST.id : null;
+export function loadActivePlaylistId(): string {
+  if (typeof window === "undefined") return DEFAULT_PLAYLIST.id;
+  return window.localStorage.getItem(ACTIVE_KEY) || DEFAULT_PLAYLIST.id;
 }
 
-export function saveActivePlaylistId(section: ContentType, id: string): void {
+export function saveActivePlaylistId(id: string): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(ACTIVE_KEY_PREFIX + section, id);
+  window.localStorage.setItem(ACTIVE_KEY, id);
 }
 
 export function makePlaylistId(name: string): string {

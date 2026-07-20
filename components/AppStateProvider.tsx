@@ -13,7 +13,6 @@ import {
   saveActivePlaylistId,
   saveLocalChannels,
   saveStoredPlaylists,
-  type ContentType,
   type PlaylistSource,
 } from "@/lib/playlists";
 import { loadFavorites, saveFavorites } from "@/lib/favorites";
@@ -23,8 +22,7 @@ const OVERRIDE_STORAGE_KEY = "m3u-player:channel-source-override";
 
 interface State {
   playlists: PlaylistSource[];
-  section: ContentType;
-  activePlaylistId: string | null;
+  activePlaylistId: string;
   channelsBySource: Record<string, Channel[]>;
   loadingPlaylistId: string | null;
   playlistError: string | null;
@@ -41,12 +39,11 @@ type Action =
       channelSourceOverride: Record<string, string>;
       favorites: Set<string>;
     }
-  | { type: "SET_SECTION"; section: ContentType; activeId: string | null }
   | { type: "SWITCH_PLAYLIST_START"; id: string }
   | { type: "SWITCH_PLAYLIST_DONE"; id: string; channels: Channel[] }
   | { type: "SWITCH_PLAYLIST_ERROR"; id: string; error: string }
   | { type: "ADD_PLAYLIST"; playlist: PlaylistSource; channels: Channel[] }
-  | { type: "REMOVE_PLAYLIST"; id: string; fallbackId: string | null }
+  | { type: "REMOVE_PLAYLIST"; id: string; fallbackId: string }
   | { type: "SET_SEARCH"; query: string }
   | { type: "SET_GROUP"; group: string | null }
   | { type: "SET_CHANNEL_SOURCE_OVERRIDE"; channelKey: string; playlistId: string | null }
@@ -74,17 +71,6 @@ function reducer(state: State, action: Action): State {
       else next.add(action.channelKey);
       return { ...state, favorites: next };
     }
-    case "SET_SECTION":
-      return {
-        ...state,
-        section: action.section,
-        activePlaylistId: action.activeId,
-        loadingPlaylistId:
-          action.activeId && !state.channelsBySource[action.activeId] ? action.activeId : null,
-        playlistError: null,
-        selectedGroup: null,
-        searchQuery: "",
-      };
     case "SWITCH_PLAYLIST_START":
       return {
         ...state,
@@ -107,7 +93,6 @@ function reducer(state: State, action: Action): State {
       return {
         ...state,
         playlists,
-        section: action.playlist.contentType,
         activePlaylistId: action.playlist.id,
         channelsBySource: { ...state.channelsBySource, [action.playlist.id]: action.channels },
         loadingPlaylistId: null,
@@ -138,12 +123,8 @@ function reducer(state: State, action: Action): State {
 }
 
 interface AppStateValue {
-  section: ContentType;
-  setSection: (section: ContentType) => void;
-
   playlists: PlaylistSource[];
-  sectionPlaylists: PlaylistSource[];
-  activePlaylistId: string | null;
+  activePlaylistId: string;
   activePlaylist: PlaylistSource | null;
   channels: Channel[];
   channelsBySource: Record<string, Channel[]>;
@@ -154,8 +135,8 @@ interface AppStateValue {
   selectedGroup: string | null;
 
   switchPlaylist: (id: string) => void;
-  addPlaylist: (name: string, url: string, contentType: ContentType) => Promise<void>;
-  addLocalPlaylist: (name: string, m3uText: string, contentType: ContentType) => Promise<void>;
+  addPlaylist: (name: string, url: string) => Promise<void>;
+  addLocalPlaylist: (name: string, m3uText: string) => Promise<void>;
   removePlaylist: (id: string) => void;
   setSearchQuery: (q: string) => void;
   setSelectedGroup: (g: string | null) => void;
@@ -200,7 +181,6 @@ export function AppStateProvider({
 
   const [state, dispatch] = useReducer(reducer, {
     playlists: [DEFAULT_PLAYLIST],
-    section: "tv",
     activePlaylistId: DEFAULT_PLAYLIST.id,
     channelsBySource: { [DEFAULT_PLAYLIST.id]: initialChannels },
     loadingPlaylistId: null,
@@ -255,8 +235,8 @@ export function AppStateProvider({
     }
   }, []);
 
-  // Hydrate saved playlists / active section+list / overrides / favorites
-  // from localStorage/URL once on mount (client-only, after the first paint
+  // Hydrate saved playlists / active list / overrides / favorites from
+  // localStorage/URL once on mount (client-only, after the first paint
   // matches the server).
   useEffect(() => {
     const playlists = loadStoredPlaylists();
@@ -268,19 +248,9 @@ export function AppStateProvider({
     });
     hydratedRef.current = true;
 
-    const section = (searchParams.get("section") as ContentType) || "tv";
     const listParam = searchParams.get("list");
-    const storedActiveId = loadActivePlaylistId(section);
-    const targetId = listParam || storedActiveId;
-    const target = targetId
-      ? playlists.find((p) => p.id === targetId && p.contentType === section)
-      : undefined;
-
-    dispatch({
-      type: "SET_SECTION",
-      section,
-      activeId: target ? target.id : section === "tv" ? DEFAULT_PLAYLIST.id : null,
-    });
+    const targetId = listParam || loadActivePlaylistId();
+    const target = playlists.find((p) => p.id === targetId);
 
     if (target && target.id !== DEFAULT_PLAYLIST.id) {
       switchPlaylistInternal(target);
@@ -288,37 +258,11 @@ export function AppStateProvider({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const setSection = useCallback(
-    (section: ContentType) => {
-      const storedActiveId = loadActivePlaylistId(section);
-      const candidate = state.playlists.find(
-        (p) => p.id === storedActiveId && p.contentType === section
-      );
-      const fallback = state.playlists.find((p) => p.contentType === section) ?? null;
-      const target = candidate ?? fallback;
-
-      dispatch({ type: "SET_SECTION", section, activeId: target ? target.id : null });
-
-      const params = new URLSearchParams(searchParams.toString());
-      params.delete("channel");
-      if (section === "tv") params.delete("section");
-      else params.set("section", section);
-      if (target && target.id !== DEFAULT_PLAYLIST.id) params.set("list", target.id);
-      else params.delete("list");
-      router.push(`/?${params.toString()}`, { scroll: false });
-
-      if (target && !state.channelsBySource[target.id]) {
-        switchPlaylistInternal(target);
-      }
-    },
-    [state.playlists, state.channelsBySource, searchParams, router, switchPlaylistInternal]
-  );
-
   const switchPlaylist = useCallback(
     (id: string) => {
       const source = state.playlists.find((p) => p.id === id);
       if (!source) return;
-      saveActivePlaylistId(source.contentType, id);
+      saveActivePlaylistId(id);
       if (state.channelsBySource[id]) {
         dispatch({ type: "SWITCH_PLAYLIST_START", id });
         dispatch({ type: "SWITCH_PLAYLIST_DONE", id, channels: state.channelsBySource[id] });
@@ -338,22 +282,20 @@ export function AppStateProvider({
   );
 
   const addPlaylist = useCallback(
-    async (name: string, url: string, contentType: ContentType) => {
+    async (name: string, url: string) => {
       const trimmedName = name.trim() || url;
       const id = makePlaylistId(trimmedName);
-      const source: PlaylistSource = { id, name: trimmedName, url: url.trim(), contentType };
+      const source: PlaylistSource = { id, name: trimmedName, url: url.trim() };
       dispatch({ type: "SWITCH_PLAYLIST_START", id });
       try {
         const channels = await fetchPlaylistChannels(source.url);
         dispatch({ type: "ADD_PLAYLIST", playlist: source, channels });
         const next = [...loadStoredPlaylists().filter((p) => !p.isDefault), source];
         saveStoredPlaylists(next);
-        saveActivePlaylistId(contentType, id);
+        saveActivePlaylistId(id);
         const params = new URLSearchParams(searchParams.toString());
         params.delete("channel");
         params.set("list", id);
-        if (contentType === "tv") params.delete("section");
-        else params.set("section", contentType);
         router.push(`/?${params.toString()}`, { scroll: false });
       } catch (err) {
         dispatch({
@@ -371,7 +313,7 @@ export function AppStateProvider({
   // once here, then persisted to localStorage since there's nothing to
   // re-fetch from later.
   const addLocalPlaylist = useCallback(
-    async (name: string, m3uText: string, contentType: ContentType) => {
+    async (name: string, m3uText: string) => {
       const channels = parseM3U(m3uText);
       if (channels.length === 0) {
         throw new Error("No se encontraron canales válidos en el texto pegado.");
@@ -382,19 +324,16 @@ export function AppStateProvider({
         id,
         name: trimmedName,
         url: "",
-        contentType,
         origin: "local",
       };
       dispatch({ type: "ADD_PLAYLIST", playlist: source, channels });
       saveLocalChannels(id, channels);
       const next = [...loadStoredPlaylists().filter((p) => !p.isDefault), source];
       saveStoredPlaylists(next);
-      saveActivePlaylistId(contentType, id);
+      saveActivePlaylistId(id);
       const params = new URLSearchParams(searchParams.toString());
       params.delete("channel");
       params.set("list", id);
-      if (contentType === "tv") params.delete("section");
-      else params.set("section", contentType);
       router.push(`/?${params.toString()}`, { scroll: false });
     },
     [router, searchParams]
@@ -403,21 +342,15 @@ export function AppStateProvider({
   const removePlaylist = useCallback(
     (id: string) => {
       const removed = state.playlists.find((p) => p.id === id);
-      const section = removed?.contentType ?? state.section;
-      const remainingInSection = state.playlists.filter(
-        (p) => p.id !== id && p.contentType === section
-      );
-      const fallback = section === "tv" ? DEFAULT_PLAYLIST : (remainingInSection[0] ?? null);
-
       if (removed?.origin === "local") removeLocalChannels(id);
 
-      dispatch({ type: "REMOVE_PLAYLIST", id, fallbackId: fallback ? fallback.id : null });
+      dispatch({ type: "REMOVE_PLAYLIST", id, fallbackId: DEFAULT_PLAYLIST.id });
 
       const remaining = loadStoredPlaylists().filter((p) => p.id !== id);
       saveStoredPlaylists(remaining);
-      if (fallback) saveActivePlaylistId(section, fallback.id);
+      saveActivePlaylistId(DEFAULT_PLAYLIST.id);
     },
-    [state.playlists, state.section]
+    [state.playlists]
   );
 
   const setSearchQuery = useCallback((query: string) => {
@@ -437,19 +370,14 @@ export function AppStateProvider({
   }, []);
 
   const value = useMemo<AppStateValue>(() => {
-    const activePlaylist =
-      state.playlists.find((p) => p.id === state.activePlaylistId) ?? null;
-    const sectionPlaylists = state.playlists.filter((p) => p.contentType === state.section);
+    const activePlaylist = state.playlists.find((p) => p.id === state.activePlaylistId) ?? null;
     return {
-      section: state.section,
-      setSection,
       playlists: state.playlists,
-      sectionPlaylists,
       activePlaylistId: state.activePlaylistId,
       activePlaylist,
-      channels: state.activePlaylistId ? state.channelsBySource[state.activePlaylistId] || [] : [],
+      channels: state.channelsBySource[state.activePlaylistId] || [],
       channelsBySource: state.channelsBySource,
-      isLoadingPlaylist: Boolean(state.activePlaylistId) && state.loadingPlaylistId === state.activePlaylistId,
+      isLoadingPlaylist: state.loadingPlaylistId === state.activePlaylistId,
       playlistError: state.playlistError,
       searchQuery: state.searchQuery,
       selectedGroup: state.selectedGroup,
@@ -466,7 +394,6 @@ export function AppStateProvider({
     };
   }, [
     state,
-    setSection,
     switchPlaylist,
     addPlaylist,
     addLocalPlaylist,

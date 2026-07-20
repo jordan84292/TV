@@ -8,8 +8,7 @@ type AddMode = "url" | "paste";
 
 export default function PlaylistSelector() {
   const {
-    section,
-    sectionPlaylists,
+    playlists,
     activePlaylistId,
     switchPlaylist,
     addPlaylist,
@@ -27,8 +26,8 @@ export default function PlaylistSelector() {
   const [formError, setFormError] = useState<string | null>(null);
   const [addingSuggestedUrl, setAddingSuggestedUrl] = useState<string | null>(null);
 
-  const activePlaylist = sectionPlaylists.find((p) => p.id === activePlaylistId);
-  const label = activePlaylist?.name ?? (section === "tv" ? "Elegir lista de TV" : "Elegir lista de películas/series");
+  const activePlaylist = playlists.find((p) => p.id === activePlaylistId);
+  const label = activePlaylist?.name ?? "Elegir lista";
 
   function resetForm() {
     setName("");
@@ -48,13 +47,13 @@ export default function PlaylistSelector() {
           setFormError("Ingresa la URL de una lista .m3u o .m3u8.");
           return;
         }
-        await addPlaylist(name, url, section);
+        await addPlaylist(name, url);
       } else {
         if (!pastedText.trim()) {
           setFormError("Pegá el contenido de una lista M3U (empieza con #EXTM3U).");
           return;
         }
-        await addLocalPlaylist(name, pastedText, section);
+        await addLocalPlaylist(name, pastedText);
       }
       resetForm();
     } catch (err) {
@@ -68,7 +67,7 @@ export default function PlaylistSelector() {
     setAddingSuggestedUrl(suggestedUrl);
     setFormError(null);
     try {
-      await addPlaylist(name, suggestedUrl, section);
+      await addPlaylist(name, suggestedUrl);
       setOpen(false);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "No se pudo agregar la lista.");
@@ -99,13 +98,10 @@ export default function PlaylistSelector() {
       {open && (
         <div className="absolute right-0 z-20 mt-2 w-96 rounded-xl border border-neutral-800 bg-neutral-900 p-2 shadow-xl">
           <p className="px-2 pb-1 pt-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">
-            {section === "tv" ? "Listas de TV" : "Listas de películas/series"}
+            Listas
           </p>
-          {sectionPlaylists.length === 0 && (
-            <p className="px-2 py-2 text-sm text-neutral-500">Todavía no agregaste ninguna lista acá.</p>
-          )}
           <ul className="max-h-56 overflow-y-auto">
-            {sectionPlaylists.map((p) => (
+            {playlists.map((p) => (
               <li key={p.id} className="flex items-center gap-1">
                 <button
                   onClick={() => {
@@ -141,8 +137,7 @@ export default function PlaylistSelector() {
           {playlistError && <p className="px-2 py-1 text-xs text-red-500">{playlistError}</p>}
 
           <SuggestedList
-            section={section}
-            alreadyAddedUrls={sectionPlaylists.map((p) => p.url)}
+            alreadyAddedUrls={playlists.map((p) => p.url)}
             addingUrl={addingSuggestedUrl}
             onAdd={handleAddSuggested}
           />
@@ -223,7 +218,7 @@ export default function PlaylistSelector() {
               onClick={() => setShowForm(true)}
               className="mt-1 w-full rounded-lg border-t border-neutral-800 px-2 py-2 text-left text-sm text-red-500 hover:bg-neutral-800"
             >
-              {section === "tv" ? "+ Agregar lista de TV" : "+ Agregar lista de películas/series"}
+              + Agregar lista
             </button>
           )}
         </div>
@@ -233,19 +228,15 @@ export default function PlaylistSelector() {
 }
 
 function SuggestedList({
-  section,
   alreadyAddedUrls,
   addingUrl,
   onAdd,
 }: {
-  section: "tv" | "vod";
   alreadyAddedUrls: string[];
   addingUrl: string | null;
   onAdd: (name: string, url: string) => void;
 }) {
-  const options = SUGGESTED_PLAYLISTS.filter(
-    (s) => s.contentType === section && !alreadyAddedUrls.includes(s.url)
-  );
+  const options = SUGGESTED_PLAYLISTS.filter((s) => !alreadyAddedUrls.includes(s.url));
   if (options.length === 0) return null;
 
   return (
