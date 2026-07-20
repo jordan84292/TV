@@ -4,6 +4,7 @@ export interface Channel {
   logoUrl: string | null;
   group: string;
   streamUrl: string;
+  tvgId: string | null;
 }
 
 export interface ChannelGroup {

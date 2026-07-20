@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Hls, { ErrorData, Events, LevelSwitchedData } from "hls.js";
-import type { Channel } from "@/types/channel";
+import Hls, { Events, LevelSwitchedData } from "hls.js";
+import type { ChannelSource } from "@/lib/channelMatch";
 
 // An http:// stream can never load from an https:// page -- browsers block
 // it as mixed content no matter what. Route only that case through our
@@ -15,21 +15,32 @@ function resolvePlaybackUrl(url: string): string {
   return url;
 }
 
+const MAX_RETRIES_PER_SOURCE = 1;
+const MAX_HLS_RECOVERIES = 3;
+const RETRY_DELAY_MS = 1200;
+
 interface VideoPlayerProps {
-  channel: Channel | null;
+  sources: ChannelSource[];
+  live: boolean;
   onPickAnother: () => void;
 }
 
 type PlayerStatus = "idle" | "loading" | "playing" | "buffering" | "error";
 
-export default function VideoPlayer({ channel, onPickAnother }: VideoPlayerProps) {
+// `sources` is expected to change identity only when the user picks a new
+// channel or a different source for the same channel -- callers key this
+// component on that so retry/fallback state below always starts fresh.
+export default function VideoPlayer({ sources, live, onPickAnother }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [sourceIndex, setSourceIndex] = useState(0);
+  const [manualRetryToken, setManualRetryToken] = useState(0);
   const [status, setStatus] = useState<PlayerStatus>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [statusNote, setStatusNote] = useState<string | null>(null);
   const [qualityLabel, setQualityLabel] = useState("Auto");
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
@@ -37,7 +48,7 @@ export default function VideoPlayer({ channel, onPickAnother }: VideoPlayerProps
   const [controlsVisible, setControlsVisible] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // Checked once per mount (not per channel) since browser capability
+  // Checked once per mount (not per source) since browser capability
   // doesn't change -- avoids setting state purely as a side effect.
   const [browserSupportsHls] = useState(() => {
     if (typeof window === "undefined") return true;
@@ -45,85 +56,129 @@ export default function VideoPlayer({ channel, onPickAnother }: VideoPlayerProps
     return Boolean(probe.canPlayType("application/vnd.apple.mpegurl")) || Hls.isSupported();
   });
 
-  // Set up playback whenever the selected channel changes.
+  const current: ChannelSource | null = sources[sourceIndex] ?? null;
+
+  // Sets up playback for the current source, retrying it a couple of times
+  // and, if it never recovers, automatically advancing to the next source
+  // (the same channel from a different list) before finally giving up.
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !channel || !browserSupportsHls) return;
+    if (!video || !current || !browserSupportsHls) return;
 
-    setStatus("loading");
-    setErrorMessage(null);
-    setQualityLabel("Auto");
+    let cancelled = false;
+    let retries = 0;
+    let hlsRecoveries = 0;
 
-    if (hlsRef.current) {
-      hlsRef.current.destroy();
-      hlsRef.current = null;
-    }
-
-    const canPlayNative = video.canPlayType("application/vnd.apple.mpegurl");
-
-    if (canPlayNative) {
-      video.src = resolvePlaybackUrl(channel.streamUrl);
-      video.addEventListener(
-        "loadedmetadata",
-        () => {
-          video.play().catch(() => undefined);
-        },
-        { once: true }
-      );
-    } else if (Hls.isSupported()) {
-      const hls = new Hls({
-        // Cap requested resolution to the actual player size, and let ABR
-        // pick the best quality that fits available bandwidth -- the same
-        // "start fast, adapt up" behavior YouTube uses instead of always
-        // requesting the highest bitrate.
-        capLevelToPlayerSize: true,
-        startLevel: -1,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
-        backBufferLength: 90,
-        enableWorker: true,
-      });
-      hlsRef.current = hls;
-
-      hls.on(Events.MANIFEST_PARSED, () => {
-        video.play().catch(() => undefined);
-      });
-
-      hls.on(Events.LEVEL_SWITCHED, (_evt, data: LevelSwitchedData) => {
-        const level = hls.levels[data.level];
-        if (level?.height) setQualityLabel(`Auto (${level.height}p)`);
-      });
-
-      hls.on(Events.ERROR, (_evt, data: ErrorData) => {
-        if (!data.fatal) return;
-        switch (data.type) {
-          case Hls.ErrorTypes.NETWORK_ERROR:
-            hls.startLoad();
-            break;
-          case Hls.ErrorTypes.MEDIA_ERROR:
-            hls.recoverMediaError();
-            break;
-          default:
-            setStatus("error");
-            setErrorMessage("Este canal no está disponible en este momento.");
-            hls.destroy();
-            hlsRef.current = null;
-        }
-      });
-
-      hls.loadSource(resolvePlaybackUrl(channel.streamUrl));
-      hls.attachMedia(video);
-    }
-
-    return () => {
+    const cleanupHls = () => {
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+    };
+
+    const fail = () => {
+      if (cancelled) return;
+      cleanupHls();
+
+      if (retries < MAX_RETRIES_PER_SOURCE) {
+        retries += 1;
+        setStatusNote(`Reintentando "${current.playlistName}"…`);
+        setTimeout(() => {
+          if (!cancelled) attemptPlayback();
+        }, RETRY_DELAY_MS);
+        return;
+      }
+
+      if (sourceIndex + 1 < sources.length) {
+        const next = sources[sourceIndex + 1];
+        setStatusNote(`"${current.playlistName}" no respondió, probando "${next.playlistName}"…`);
+        setTimeout(() => {
+          if (!cancelled) setSourceIndex((i) => i + 1);
+        }, RETRY_DELAY_MS);
+        return;
+      }
+
+      setStatus("error");
+      setStatusNote(null);
+      setErrorMessage(
+        sources.length > 1
+          ? "Ninguna de las fuentes disponibles para este canal está funcionando ahora mismo."
+          : "Este canal no está disponible en este momento."
+      );
+    };
+
+    const attemptPlayback = () => {
+      if (cancelled) return;
+      setStatus("loading");
+      setErrorMessage(null);
+      setQualityLabel("Auto");
+      cleanupHls();
+
+      const url = resolvePlaybackUrl(current.channel.streamUrl);
+      const canPlayNative = video.canPlayType("application/vnd.apple.mpegurl");
+
+      if (canPlayNative) {
+        video.src = url;
+        video.addEventListener("loadedmetadata", () => video.play().catch(() => undefined), {
+          once: true,
+        });
+        video.addEventListener("error", () => fail(), { once: true });
+      } else if (Hls.isSupported()) {
+        const hls = new Hls({
+          // Cap requested resolution to the actual player size, and let ABR
+          // pick the best quality that fits available bandwidth -- the same
+          // "start fast, adapt up" behavior YouTube uses instead of always
+          // requesting the highest bitrate.
+          capLevelToPlayerSize: true,
+          startLevel: -1,
+          maxBufferLength: 30,
+          maxMaxBufferLength: 60,
+          backBufferLength: 90,
+          enableWorker: true,
+        });
+        hlsRef.current = hls;
+
+        hls.on(Events.MANIFEST_PARSED, () => {
+          setStatusNote(null);
+          video.play().catch(() => undefined);
+        });
+
+        hls.on(Events.LEVEL_SWITCHED, (_evt, data: LevelSwitchedData) => {
+          const level = hls.levels[data.level];
+          if (level?.height) setQualityLabel(`Auto (${level.height}p)`);
+        });
+
+        hls.on(Events.ERROR, (_evt, data) => {
+          if (!data.fatal) return;
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && hlsRecoveries < MAX_HLS_RECOVERIES) {
+            hlsRecoveries += 1;
+            hls.startLoad();
+            return;
+          }
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && hlsRecoveries < MAX_HLS_RECOVERIES) {
+            hlsRecoveries += 1;
+            hls.recoverMediaError();
+            return;
+          }
+          fail();
+        });
+
+        hls.loadSource(url);
+        hls.attachMedia(video);
+      } else {
+        fail();
+      }
+    };
+
+    attemptPlayback();
+
+    return () => {
+      cancelled = true;
+      cleanupHls();
       video.removeAttribute("src");
       video.load();
     };
-  }, [channel, browserSupportsHls]);
+  }, [current, sourceIndex, sources, browserSupportsHls, manualRetryToken]);
 
   // Native <video> element events drive buffering/playing state.
   useEffect(() => {
@@ -136,22 +191,16 @@ export default function VideoPlayer({ channel, onPickAnother }: VideoPlayerProps
       setIsPlaying(true);
     };
     const onPause = () => setIsPlaying(false);
-    const onVideoError = () => {
-      setStatus("error");
-      setErrorMessage("Este canal no está disponible en este momento.");
-    };
 
     video.addEventListener("waiting", onWaiting);
     video.addEventListener("playing", onPlaying);
     video.addEventListener("pause", onPause);
-    video.addEventListener("error", onVideoError);
     return () => {
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("playing", onPlaying);
       video.removeEventListener("pause", onPause);
-      video.removeEventListener("error", onVideoError);
     };
-  }, [channel]);
+  }, [current]);
 
   useEffect(() => {
     const onFsChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
@@ -195,19 +244,10 @@ export default function VideoPlayer({ channel, onPickAnother }: VideoPlayerProps
     hideControlsTimer.current = setTimeout(() => setControlsVisible(false), 2800);
   }, []);
 
-  const retry = useCallback(() => {
-    if (!channel) return;
-    setStatus("loading");
-    setErrorMessage(null);
-    const video = videoRef.current;
-    if (Hls.isSupported() && video) {
-      const hls = new Hls({ capLevelToPlayerSize: true, startLevel: -1 });
-      hlsRef.current = hls;
-      hls.loadSource(resolvePlaybackUrl(channel.streamUrl));
-      hls.attachMedia(video);
-      hls.on(Events.MANIFEST_PARSED, () => video.play().catch(() => undefined));
-    }
-  }, [channel]);
+  const retryFromStart = useCallback(() => {
+    setSourceIndex(0);
+    setManualRetryToken((t) => t + 1);
+  }, []);
 
   if (!browserSupportsHls) {
     return (
@@ -218,7 +258,7 @@ export default function VideoPlayer({ channel, onPickAnother }: VideoPlayerProps
     );
   }
 
-  if (!channel) {
+  if (!current) {
     return (
       <div className="flex aspect-video w-full items-center justify-center rounded-xl bg-neutral-900 text-neutral-500">
         Selecciona un canal para comenzar a ver
@@ -233,17 +273,12 @@ export default function VideoPlayer({ channel, onPickAnother }: VideoPlayerProps
       onMouseMove={wakeControls}
       onMouseLeave={() => setControlsVisible(false)}
     >
-      <video
-        ref={videoRef}
-        className="h-full w-full"
-        playsInline
-        autoPlay
-        onClick={togglePlay}
-      />
+      <video ref={videoRef} className="h-full w-full" playsInline autoPlay onClick={togglePlay} />
 
       {(status === "loading" || status === "buffering") && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/30">
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/30">
           <div className="h-12 w-12 animate-spin rounded-full border-4 border-white/20 border-t-white" />
+          {statusNote && <p className="max-w-xs text-center text-sm text-neutral-200">{statusNote}</p>}
         </div>
       )}
 
@@ -255,7 +290,7 @@ export default function VideoPlayer({ channel, onPickAnother }: VideoPlayerProps
           </p>
           <div className="mt-2 flex gap-3">
             <button
-              onClick={retry}
+              onClick={retryFromStart}
               className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-neutral-200"
             >
               Reintentar
@@ -302,11 +337,18 @@ export default function VideoPlayer({ channel, onPickAnother }: VideoPlayerProps
           aria-label="Volumen"
         />
 
-        <span className="flex items-center gap-1 rounded bg-red-600 px-2 py-0.5 text-xs font-bold text-white">
-          <span className="h-1.5 w-1.5 rounded-full bg-white" /> EN VIVO
-        </span>
+        {live && (
+          <span className="flex items-center gap-1 rounded bg-red-600 px-2 py-0.5 text-xs font-bold text-white">
+            <span className="h-1.5 w-1.5 rounded-full bg-white" /> EN VIVO
+          </span>
+        )}
 
-        <span className="truncate text-sm text-white">{channel.name}</span>
+        <span className="truncate text-sm text-white">{current.channel.name}</span>
+        {sources.length > 1 && (
+          <span className="hidden shrink-0 truncate text-xs text-neutral-400 sm:inline">
+            ({current.playlistName})
+          </span>
+        )}
 
         <span className="ml-auto text-xs text-neutral-300">{qualityLabel}</span>
 

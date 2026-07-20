@@ -54,6 +54,7 @@ export function parseM3U(raw: string): Channel[] {
       logoUrl: pendingLogo,
       group: pendingGroup,
       streamUrl,
+      tvgId: pendingId || null,
     });
 
     pendingName = "";

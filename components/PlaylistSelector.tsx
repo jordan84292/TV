@@ -2,11 +2,11 @@
 
 import { useState } from "react";
 import { useAppState } from "./AppStateProvider";
-import { DEFAULT_PLAYLIST } from "@/lib/playlists";
 
 export default function PlaylistSelector() {
   const {
-    playlists,
+    section,
+    sectionPlaylists,
     activePlaylistId,
     switchPlaylist,
     addPlaylist,
@@ -20,7 +20,8 @@ export default function PlaylistSelector() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  const activePlaylist = playlists.find((p) => p.id === activePlaylistId) || DEFAULT_PLAYLIST;
+  const activePlaylist = sectionPlaylists.find((p) => p.id === activePlaylistId);
+  const label = activePlaylist?.name ?? (section === "tv" ? "Elegir lista de TV" : "Elegir lista de películas/series");
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -31,7 +32,7 @@ export default function PlaylistSelector() {
     setSubmitting(true);
     setFormError(null);
     try {
-      await addPlaylist(name, url);
+      await addPlaylist(name, url, section);
       setName("");
       setUrl("");
       setShowForm(false);
@@ -49,17 +50,20 @@ export default function PlaylistSelector() {
         onClick={() => setOpen((o) => !o)}
         className="flex max-w-[220px] items-center gap-2 rounded-full border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-sm text-neutral-200 hover:bg-neutral-800"
       >
-        <span className="truncate">{activePlaylist.name}</span>
+        <span className="truncate">{label}</span>
         <ChevronIcon />
       </button>
 
       {open && (
         <div className="absolute right-0 z-20 mt-2 w-80 rounded-xl border border-neutral-800 bg-neutral-900 p-2 shadow-xl">
           <p className="px-2 pb-1 pt-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">
-            Listas
+            {section === "tv" ? "Listas de TV" : "Listas de películas/series"}
           </p>
+          {sectionPlaylists.length === 0 && (
+            <p className="px-2 py-2 text-sm text-neutral-500">Todavía no agregaste ninguna lista acá.</p>
+          )}
           <ul className="max-h-56 overflow-y-auto">
-            {playlists.map((p) => (
+            {sectionPlaylists.map((p) => (
               <li key={p.id} className="flex items-center gap-1">
                 <button
                   onClick={() => {
@@ -126,7 +130,7 @@ export default function PlaylistSelector() {
               onClick={() => setShowForm(true)}
               className="mt-1 w-full rounded-lg border-t border-neutral-800 px-2 py-2 text-left text-sm text-red-500 hover:bg-neutral-800"
             >
-              + Agregar lista m3u8
+              {section === "tv" ? "+ Agregar lista de TV" : "+ Agregar lista de películas/series"}
             </button>
           )}
         </div>
