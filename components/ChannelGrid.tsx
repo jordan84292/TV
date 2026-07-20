@@ -57,7 +57,7 @@ export default function ChannelGrid({
         scanCursorRef.current += batch.length;
 
         await checkMany(
-          batch.map((c) => c.streamUrl),
+          batch,
           (streamUrl, ok) => {
             if (cancelled || !ok) return;
             const found = batch.find((c) => c.streamUrl === streamUrl);

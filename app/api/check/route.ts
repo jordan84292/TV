@@ -19,7 +19,12 @@ function looksLikeManifest(url: string): boolean {
   return url.toLowerCase().split("?")[0].endsWith(".m3u8");
 }
 
-async function probe(url: string, origin: string, wantBody: boolean): Promise<ProbeResult> {
+async function probe(
+  url: string,
+  origin: string,
+  wantBody: boolean,
+  referrer: string | null
+): Promise<ProbeResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
@@ -28,9 +33,11 @@ async function probe(url: string, origin: string, wantBody: boolean): Promise<Pr
       signal: controller.signal,
       headers: {
         "User-Agent": USER_AGENT,
-        // Node's fetch lets us set Origin explicitly (browsers forbid this) so
-        // we can check the exact CORS response a real browser tab would get.
+        // Node's fetch lets us set Origin/Referer explicitly (browsers
+        // forbid this) so we can check the exact response a real browser
+        // tab -- or our own proxy, which can set Referer too -- would get.
         Origin: origin,
+        ...(referrer ? { Referer: referrer } : {}),
         ...(wantBody ? {} : { Range: "bytes=0-1024" }),
       },
     });
@@ -59,12 +66,13 @@ function firstResourceUri(manifestText: string, manifestUrl: string): string | n
 }
 
 // Mirrors exactly what the player will do (see VideoPlayer's
-// resolvePlaybackUrl): an http:// hop on an https:// deploy goes through our
-// same-origin proxy, so only its reachability matters, not its CORS headers
-// -- our server doesn't need permission from the origin the way a browser
-// fetch would. An https:// hop stays direct, so CORS still has to check out.
+// resolvePlaybackUrl): a hop that will be proxied (http:// on an https://
+// deploy, or any channel that needs a specific Referer) only needs to be
+// reachable -- our server doesn't need the origin's permission the way a
+// browser fetch would. A hop that stays direct still has to pass CORS.
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get("url");
+  const referrer = request.nextUrl.searchParams.get("ref");
   if (!url) {
     return NextResponse.json({ ok: false, error: "Falta el parámetro 'url'." }, { status: 400 });
   }
@@ -82,10 +90,10 @@ export async function GET(request: NextRequest) {
   let currentUrl = parsed.toString();
 
   for (let depth = 0; depth < MAX_DEPTH; depth++) {
-    const willBeProxied = pageIsSecure && new URL(currentUrl).protocol === "http:";
+    const willBeProxied = Boolean(referrer) || (pageIsSecure && new URL(currentUrl).protocol === "http:");
 
     const wantBody = looksLikeManifest(currentUrl);
-    const result = await probe(currentUrl, origin, wantBody);
+    const result = await probe(currentUrl, origin, wantBody, referrer);
 
     if (!result.reachable || (!willBeProxied && !result.corsOk)) {
       return NextResponse.json({ ok: false });

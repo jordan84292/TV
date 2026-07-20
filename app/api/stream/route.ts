@@ -1,38 +1,45 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Proxies http:// HLS manifests and segments through our own (https://)
-// origin so the browser doesn't reject them as mixed content -- that block
-// happens regardless of CORS headers and can't be worked around any other
-// way. https:// resources are left as direct, unproxied URLs (see
-// rewriteManifest below), so most playback still goes straight
-// browser-to-origin and only the http:// minority costs us bandwidth.
+// Proxies HLS manifests and segments through our own (https://) origin in
+// two cases where the browser can't play them directly:
+//   1. http:// on an https:// page -- blocked outright as mixed content.
+//   2. The channel requires a specific Referer header (anti-hotlinking) --
+//      browsers refuse to let JS set that on a direct request, but our
+//      server-side fetch can set anything.
+// Everything else is left as a direct, unproxied URL (see
+// resolveForPlayback below), so most playback still goes straight
+// browser-to-origin and only the channels that actually need it cost us
+// bandwidth.
 
-function resolveForPlayback(uri: string, base: string): string {
+function resolveForPlayback(uri: string, base: string, ref: string | null): string {
   const absolute = new URL(uri, base).toString();
-  if (absolute.startsWith("http://")) {
-    return `/api/stream?url=${encodeURIComponent(absolute)}`;
+  if (ref || absolute.startsWith("http://")) {
+    const params = new URLSearchParams({ url: absolute });
+    if (ref) params.set("ref", ref);
+    return `/api/stream?${params.toString()}`;
   }
   return absolute;
 }
 
-function rewriteManifest(text: string, manifestUrl: string): string {
+function rewriteManifest(text: string, manifestUrl: string, ref: string | null): string {
   return text
     .split(/\r?\n/)
     .map((line) => {
       if (line.startsWith("#")) {
         if (line.includes('URI="')) {
-          return line.replace(/URI="([^"]+)"/, (_m, uri) => `URI="${resolveForPlayback(uri, manifestUrl)}"`);
+          return line.replace(/URI="([^"]+)"/, (_m, uri) => `URI="${resolveForPlayback(uri, manifestUrl, ref)}"`);
         }
         return line;
       }
       if (line.trim() === "") return line;
-      return resolveForPlayback(line.trim(), manifestUrl);
+      return resolveForPlayback(line.trim(), manifestUrl, ref);
     })
     .join("\n");
 }
 
 export async function GET(request: NextRequest) {
   const target = request.nextUrl.searchParams.get("url");
+  const ref = request.nextUrl.searchParams.get("ref");
   if (!target) {
     return new NextResponse("Falta el parámetro 'url'.", { status: 400 });
   }
@@ -56,6 +63,7 @@ export async function GET(request: NextRequest) {
       headers: {
         "User-Agent": "Mozilla/5.0 (compatible; M3UPlayer/1.0)",
         ...(range ? { Range: range } : {}),
+        ...(ref ? { Referer: ref } : {}),
       },
     });
   } catch {
@@ -73,7 +81,7 @@ export async function GET(request: NextRequest) {
 
   if (isManifest) {
     const text = await upstream.text();
-    const rewritten = rewriteManifest(text, parsed.toString());
+    const rewritten = rewriteManifest(text, parsed.toString(), ref);
     return new NextResponse(rewritten, {
       headers: {
         "content-type": "application/vnd.apple.mpegurl",

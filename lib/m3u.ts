@@ -26,6 +26,7 @@ export function parseM3U(raw: string): Channel[] {
   let pendingLogo: string | null = null;
   let pendingGroup = "Sin categoría";
   let pendingId = "";
+  let pendingReferrer: string | null = null;
   let seq = 0;
 
   for (const rawLine of lines) {
@@ -38,6 +39,21 @@ export function parseM3U(raw: string): Channel[] {
       pendingLogo = attrs["tvg-logo"] || null;
       pendingGroup = attrs["group-title"] || "Sin categoría";
       pendingId = attrs["tvg-id"] || "";
+      pendingReferrer = attrs["http-referrer"] || attrs["referrer"] || null;
+      continue;
+    }
+
+    // Some lists specify the referrer as a VLC option line instead of (or
+    // in addition to) an #EXTINF attribute.
+    if (line.startsWith("#EXTVLCOPT:")) {
+      const opt = line.slice("#EXTVLCOPT:".length);
+      const eq = opt.indexOf("=");
+      if (eq !== -1) {
+        const key = opt.slice(0, eq).trim().toLowerCase();
+        if (key === "http-referrer" && !pendingReferrer) {
+          pendingReferrer = opt.slice(eq + 1).trim();
+        }
+      }
       continue;
     }
 
@@ -55,12 +71,14 @@ export function parseM3U(raw: string): Channel[] {
       group: pendingGroup,
       streamUrl,
       tvgId: pendingId || null,
+      referrer: pendingReferrer,
     });
 
     pendingName = "";
     pendingLogo = null;
     pendingGroup = "Sin categoría";
     pendingId = "";
+    pendingReferrer = null;
   }
 
   return channels;

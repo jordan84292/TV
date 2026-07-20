@@ -1,3 +1,5 @@
+import type { Channel } from "@/types/channel";
+
 const STORAGE_KEY = "m3u-player:channel-health";
 const TTL_MS = 20 * 60 * 1000; // 20 minutes -- streams go up/down often
 
@@ -33,13 +35,15 @@ export function getCachedHealth(streamUrl: string): boolean | null {
   return entry.ok;
 }
 
-async function checkOne(streamUrl: string): Promise<boolean> {
-  const cached = getCachedHealth(streamUrl);
+async function checkOne(channel: Channel): Promise<boolean> {
+  const cached = getCachedHealth(channel.streamUrl);
   if (cached !== null) return cached;
 
   let ok = false;
   try {
-    const res = await fetch(`/api/check?url=${encodeURIComponent(streamUrl)}`);
+    const params = new URLSearchParams({ url: channel.streamUrl });
+    if (channel.referrer) params.set("ref", channel.referrer);
+    const res = await fetch(`/api/check?${params.toString()}`);
     const data = await res.json();
     ok = Boolean(data.ok);
   } catch {
@@ -47,28 +51,28 @@ async function checkOne(streamUrl: string): Promise<boolean> {
   }
 
   const cache = loadCache();
-  cache[streamUrl] = { ok, checkedAt: Date.now() };
+  cache[channel.streamUrl] = { ok, checkedAt: Date.now() };
   saveCache(cache);
   return ok;
 }
 
-// Checks many URLs with bounded concurrency, reporting progress as results
-// land so the UI can reveal working channels incrementally instead of
-// blocking on the whole batch.
+// Checks many channels with bounded concurrency, reporting progress as
+// results land so the UI can reveal working channels incrementally instead
+// of blocking on the whole batch.
 export async function checkMany(
-  streamUrls: string[],
+  channels: Channel[],
   onResult: (streamUrl: string, ok: boolean) => void,
   concurrency = 10
 ): Promise<void> {
   let cursor = 0;
   async function worker() {
-    while (cursor < streamUrls.length) {
-      const url = streamUrls[cursor++];
-      const ok = await checkOne(url);
-      onResult(url, ok);
+    while (cursor < channels.length) {
+      const channel = channels[cursor++];
+      const ok = await checkOne(channel);
+      onResult(channel.streamUrl, ok);
     }
   }
   await Promise.all(
-    Array.from({ length: Math.min(concurrency, streamUrls.length) }, worker)
+    Array.from({ length: Math.min(concurrency, channels.length) }, worker)
   );
 }

@@ -3,16 +3,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Hls, { Events, LevelSwitchedData } from "hls.js";
 import type { ChannelSource } from "@/lib/channelMatch";
+import type { Channel } from "@/types/channel";
 
-// An http:// stream can never load from an https:// page -- browsers block
-// it as mixed content no matter what. Route only that case through our
-// same-origin proxy; https:// streams (the majority) stay direct so most
-// playback never touches our server.
-function resolvePlaybackUrl(url: string): string {
-  if (typeof window !== "undefined" && window.location.protocol === "https:" && url.startsWith("http://")) {
-    return `/api/stream?url=${encodeURIComponent(url)}`;
+// Two cases need our same-origin proxy instead of a direct request:
+//   - http:// on an https:// page: browsers block it outright as mixed
+//     content, no matter what.
+//   - The channel requires a specific Referer header (anti-hotlinking):
+//     browsers won't let JS set that on a direct request, only our server can.
+// Everything else stays direct, so most playback never touches our server.
+function resolvePlaybackUrl(channel: Channel): string {
+  const needsMixedContentProxy =
+    typeof window !== "undefined" &&
+    window.location.protocol === "https:" &&
+    channel.streamUrl.startsWith("http://");
+
+  if (channel.referrer || needsMixedContentProxy) {
+    const params = new URLSearchParams({ url: channel.streamUrl });
+    if (channel.referrer) params.set("ref", channel.referrer);
+    return `/api/stream?${params.toString()}`;
   }
-  return url;
+  return channel.streamUrl;
 }
 
 // Each source gets 4 attempts (growing delays, so a momentarily overloaded
@@ -132,7 +142,7 @@ export default function VideoPlayer({
       setQualityLabel("Auto");
       cleanupHls();
 
-      const url = resolvePlaybackUrl(current.channel.streamUrl);
+      const url = resolvePlaybackUrl(current.channel);
       const canPlayNative = video.canPlayType("application/vnd.apple.mpegurl");
 
       if (canPlayNative) {
