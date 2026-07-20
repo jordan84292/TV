@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useAppState } from "./AppStateProvider";
+import { SUGGESTED_PLAYLISTS } from "@/lib/suggestedPlaylists";
 
 type AddMode = "url" | "paste";
 
@@ -24,6 +25,7 @@ export default function PlaylistSelector() {
   const [pastedText, setPastedText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [addingSuggestedUrl, setAddingSuggestedUrl] = useState<string | null>(null);
 
   const activePlaylist = sectionPlaylists.find((p) => p.id === activePlaylistId);
   const label = activePlaylist?.name ?? (section === "tv" ? "Elegir lista de TV" : "Elegir lista de películas/series");
@@ -59,6 +61,19 @@ export default function PlaylistSelector() {
       setFormError(err instanceof Error ? err.message : "No se pudo agregar la lista.");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleAddSuggested(name: string, suggestedUrl: string) {
+    setAddingSuggestedUrl(suggestedUrl);
+    setFormError(null);
+    try {
+      await addPlaylist(name, suggestedUrl, section);
+      setOpen(false);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "No se pudo agregar la lista.");
+    } finally {
+      setAddingSuggestedUrl(null);
     }
   }
 
@@ -124,6 +139,13 @@ export default function PlaylistSelector() {
           </ul>
 
           {playlistError && <p className="px-2 py-1 text-xs text-red-500">{playlistError}</p>}
+
+          <SuggestedList
+            section={section}
+            alreadyAddedUrls={sectionPlaylists.map((p) => p.url)}
+            addingUrl={addingSuggestedUrl}
+            onAdd={handleAddSuggested}
+          />
 
           {showForm ? (
             <form onSubmit={handleSubmit} className="mt-2 flex flex-col gap-2 border-t border-neutral-800 p-2">
@@ -206,6 +228,41 @@ export default function PlaylistSelector() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function SuggestedList({
+  section,
+  alreadyAddedUrls,
+  addingUrl,
+  onAdd,
+}: {
+  section: "tv" | "vod";
+  alreadyAddedUrls: string[];
+  addingUrl: string | null;
+  onAdd: (name: string, url: string) => void;
+}) {
+  const options = SUGGESTED_PLAYLISTS.filter(
+    (s) => s.contentType === section && !alreadyAddedUrls.includes(s.url)
+  );
+  if (options.length === 0) return null;
+
+  return (
+    <div className="border-t border-neutral-800 px-2 py-2">
+      <p className="pb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">Sugeridas</p>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((s) => (
+          <button
+            key={s.url}
+            onClick={() => onAdd(s.name, s.url)}
+            disabled={addingUrl === s.url}
+            className="rounded-full bg-neutral-800 px-2.5 py-1 text-xs text-neutral-300 hover:bg-neutral-700 disabled:opacity-50"
+          >
+            {addingUrl === s.url ? "Agregando…" : `+ ${s.name}`}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
