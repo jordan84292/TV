@@ -15,14 +15,21 @@ function resolvePlaybackUrl(url: string): string {
   return url;
 }
 
-const MAX_RETRIES_PER_SOURCE = 1;
-const MAX_HLS_RECOVERIES = 3;
-const RETRY_DELAY_MS = 1200;
+// Retrying the same source uses growing delays instead of a fixed one, so a
+// server that's just momentarily overloaded gets more breathing room on
+// later attempts instead of being hammered at a constant rate.
+const RETRY_DELAYS_MS = [800, 2000, 4000];
+const MAX_RETRIES_PER_SOURCE = RETRY_DELAYS_MS.length;
+const HLS_RECOVERY_DELAYS_MS = [500, 1500, 3000, 5000];
+const MAX_HLS_RECOVERIES = HLS_RECOVERY_DELAYS_MS.length;
+const FULL_RETRY_DELAY_MS = 6000;
 
 interface VideoPlayerProps {
   sources: ChannelSource[];
   live: boolean;
   onPickAnother: () => void;
+  onNext?: () => void;
+  onPrev?: () => void;
 }
 
 type PlayerStatus = "idle" | "loading" | "playing" | "buffering" | "error";
@@ -30,14 +37,15 @@ type PlayerStatus = "idle" | "loading" | "playing" | "buffering" | "error";
 // `sources` is expected to change identity only when the user picks a new
 // channel or a different source for the same channel -- callers key this
 // component on that so retry/fallback state below always starts fresh.
-export default function VideoPlayer({ sources, live, onPickAnother }: VideoPlayerProps) {
+export default function VideoPlayer({ sources, live, onPickAnother, onNext, onPrev }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const hideControlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const usedFullRetryRef = useRef(false);
 
   const [sourceIndex, setSourceIndex] = useState(0);
-  const [manualRetryToken, setManualRetryToken] = useState(0);
+  const [retryToken, setRetryToken] = useState(0);
   const [status, setStatus] = useState<PlayerStatus>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusNote, setStatusNote] = useState<string | null>(null);
@@ -58,9 +66,11 @@ export default function VideoPlayer({ sources, live, onPickAnother }: VideoPlaye
 
   const current: ChannelSource | null = sources[sourceIndex] ?? null;
 
-  // Sets up playback for the current source, retrying it a couple of times
-  // and, if it never recovers, automatically advancing to the next source
-  // (the same channel from a different list) before finally giving up.
+  // Sets up playback for the current source: retries it a few times with
+  // growing delays, then automatically advances to the next source (the
+  // same channel from a different list) if there is one. If every source
+  // fails, it takes one more full pass from the top before finally giving
+  // up -- covers a transient blip that took out every source at once.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !current || !browserSupportsHls) return;
@@ -81,11 +91,12 @@ export default function VideoPlayer({ sources, live, onPickAnother }: VideoPlaye
       cleanupHls();
 
       if (retries < MAX_RETRIES_PER_SOURCE) {
+        const delay = RETRY_DELAYS_MS[retries];
         retries += 1;
-        setStatusNote(`Reintentando "${current.playlistName}"…`);
+        setStatusNote(`Reintentando "${current.playlistName}" (intento ${retries + 1} de ${MAX_RETRIES_PER_SOURCE + 1})…`);
         setTimeout(() => {
           if (!cancelled) attemptPlayback();
-        }, RETRY_DELAY_MS);
+        }, delay);
         return;
       }
 
@@ -94,7 +105,18 @@ export default function VideoPlayer({ sources, live, onPickAnother }: VideoPlaye
         setStatusNote(`"${current.playlistName}" no respondió, probando "${next.playlistName}"…`);
         setTimeout(() => {
           if (!cancelled) setSourceIndex((i) => i + 1);
-        }, RETRY_DELAY_MS);
+        }, RETRY_DELAYS_MS[0]);
+        return;
+      }
+
+      if (!usedFullRetryRef.current) {
+        usedFullRetryRef.current = true;
+        setStatusNote("Ninguna fuente respondió, reintentando desde el principio…");
+        setTimeout(() => {
+          if (cancelled) return;
+          if (sourceIndex === 0) setRetryToken((t) => t + 1);
+          else setSourceIndex(0);
+        }, FULL_RETRY_DELAY_MS);
         return;
       }
 
@@ -150,14 +172,16 @@ export default function VideoPlayer({ sources, live, onPickAnother }: VideoPlaye
 
         hls.on(Events.ERROR, (_evt, data) => {
           if (!data.fatal) return;
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && hlsRecoveries < MAX_HLS_RECOVERIES) {
+          const recoverable =
+            data.type === Hls.ErrorTypes.NETWORK_ERROR || data.type === Hls.ErrorTypes.MEDIA_ERROR;
+          if (recoverable && hlsRecoveries < MAX_HLS_RECOVERIES) {
+            const delay = HLS_RECOVERY_DELAYS_MS[hlsRecoveries];
             hlsRecoveries += 1;
-            hls.startLoad();
-            return;
-          }
-          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && hlsRecoveries < MAX_HLS_RECOVERIES) {
-            hlsRecoveries += 1;
-            hls.recoverMediaError();
+            setTimeout(() => {
+              if (cancelled) return;
+              if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+              else hls.recoverMediaError();
+            }, delay);
             return;
           }
           fail();
@@ -178,7 +202,7 @@ export default function VideoPlayer({ sources, live, onPickAnother }: VideoPlaye
       video.removeAttribute("src");
       video.load();
     };
-  }, [current, sourceIndex, sources, browserSupportsHls, manualRetryToken]);
+  }, [current, sourceIndex, sources, browserSupportsHls, retryToken]);
 
   // Native <video> element events drive buffering/playing state.
   useEffect(() => {
@@ -245,8 +269,9 @@ export default function VideoPlayer({ sources, live, onPickAnother }: VideoPlaye
   }, []);
 
   const retryFromStart = useCallback(() => {
+    usedFullRetryRef.current = false;
     setSourceIndex(0);
-    setManualRetryToken((t) => t + 1);
+    setRetryToken((t) => t + 1);
   }, []);
 
   if (!browserSupportsHls) {
@@ -275,10 +300,37 @@ export default function VideoPlayer({ sources, live, onPickAnother }: VideoPlaye
     >
       <video ref={videoRef} className="h-full w-full" playsInline autoPlay onClick={togglePlay} />
 
+      {onPrev && (
+        <button
+          onClick={onPrev}
+          aria-label="Canal anterior"
+          className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white opacity-0 transition-opacity hover:bg-black/70 group-hover:opacity-100"
+        >
+          <PrevIcon />
+        </button>
+      )}
+      {onNext && (
+        <button
+          onClick={onNext}
+          aria-label="Canal siguiente"
+          className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white opacity-0 transition-opacity hover:bg-black/70 group-hover:opacity-100"
+        >
+          <NextIcon />
+        </button>
+      )}
+
       {(status === "loading" || status === "buffering") && (
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/30">
           <div className="h-12 w-12 animate-spin rounded-full border-4 border-white/20 border-t-white" />
           {statusNote && <p className="max-w-xs text-center text-sm text-neutral-200">{statusNote}</p>}
+          {status === "loading" && (
+            <button
+              onClick={onPickAnother}
+              className="pointer-events-auto rounded-full bg-neutral-800/80 px-3 py-1 text-xs text-neutral-200 hover:bg-neutral-700"
+            >
+              Elegir otro canal
+            </button>
+          )}
         </div>
       )}
 
@@ -403,6 +455,20 @@ function ExitFullscreenIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" className="h-6 w-6">
       <path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z" />
+    </svg>
+  );
+}
+function PrevIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className="h-6 w-6">
+      <path d="M6 6h2v12H6zm3.5 6 8.5 6V6z" />
+    </svg>
+  );
+}
+function NextIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className="h-6 w-6">
+      <path d="M16 6h2v12h-2zM6 18l8.5-6L6 6z" />
     </svg>
   );
 }

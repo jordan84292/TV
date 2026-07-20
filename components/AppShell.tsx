@@ -80,6 +80,25 @@ export default function AppShell() {
     router.push(`/?${params.toString()}`, { scroll: false });
   }, [router, searchParams]);
 
+  // Lets the player's own prev/next buttons step through whatever list the
+  // user is currently browsing (respecting the active search/category
+  // filter), wrapping around at the ends like flipping channels.
+  const goToChannelOffset = useCallback(
+    (offset: number) => {
+      if (filteredChannels.length === 0) return;
+      const currentIndex = activeChannel
+        ? filteredChannels.findIndex((c) => c.id === activeChannel.id)
+        : -1;
+      const base = currentIndex === -1 ? 0 : currentIndex;
+      const nextIndex = (base + offset + filteredChannels.length) % filteredChannels.length;
+      selectChannel(filteredChannels[nextIndex]);
+    },
+    [filteredChannels, activeChannel, selectChannel]
+  );
+
+  const goToNextChannel = useCallback(() => goToChannelOffset(1), [goToChannelOffset]);
+  const goToPrevChannel = useCallback(() => goToChannelOffset(-1), [goToChannelOffset]);
+
   return (
     <div className="flex h-screen flex-col bg-neutral-950 text-neutral-100">
       <header className="flex items-center gap-3 border-b border-neutral-800 bg-neutral-950 px-4 py-2.5">
@@ -134,6 +153,8 @@ export default function AppShell() {
               sources={channelSources}
               live={section === "tv"}
               onPickAnother={pickAnother}
+              onNext={filteredChannels.length > 1 ? goToNextChannel : undefined}
+              onPrev={filteredChannels.length > 1 ? goToPrevChannel : undefined}
             />
 
             {activeChannel && channelSources.length > 1 && (
