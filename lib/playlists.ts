@@ -1,4 +1,5 @@
 export type ContentType = "tv" | "vod";
+export type PlaylistOrigin = "remote" | "local";
 
 export interface PlaylistSource {
   id: string;
@@ -6,6 +7,10 @@ export interface PlaylistSource {
   url: string;
   contentType: ContentType;
   isDefault?: boolean;
+  // "local" lists came from pasted/uploaded M3U text rather than a URL we
+  // can re-fetch -- their channels live in localStorage instead (see
+  // saveLocalChannels/loadLocalChannels below).
+  origin?: PlaylistOrigin;
 }
 
 export const DEFAULT_PLAYLIST: PlaylistSource = {
@@ -61,4 +66,30 @@ export function makePlaylistId(name: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "");
   return `${slug || "lista"}-${Date.now().toString(36)}`;
+}
+
+const LOCAL_CHANNELS_KEY_PREFIX = "m3u-player:local-channels:";
+
+export function saveLocalChannels<T>(playlistId: string, channels: T[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(LOCAL_CHANNELS_KEY_PREFIX + playlistId, JSON.stringify(channels));
+  } catch {
+    // Storage full -- the list just won't survive a reload.
+  }
+}
+
+export function loadLocalChannels<T>(playlistId: string): T[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(LOCAL_CHANNELS_KEY_PREFIX + playlistId);
+    return raw ? (JSON.parse(raw) as T[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function removeLocalChannels(playlistId: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(LOCAL_CHANNELS_KEY_PREFIX + playlistId);
 }

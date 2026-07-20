@@ -6,14 +6,18 @@ import type { Channel } from "@/types/channel";
 import {
   DEFAULT_PLAYLIST,
   loadActivePlaylistId,
+  loadLocalChannels,
   loadStoredPlaylists,
   makePlaylistId,
+  removeLocalChannels,
   saveActivePlaylistId,
+  saveLocalChannels,
   saveStoredPlaylists,
   type ContentType,
   type PlaylistSource,
 } from "@/lib/playlists";
 import { loadFavorites, saveFavorites } from "@/lib/favorites";
+import { parseM3U } from "@/lib/m3u";
 
 const OVERRIDE_STORAGE_KEY = "m3u-player:channel-source-override";
 
@@ -151,6 +155,7 @@ interface AppStateValue {
 
   switchPlaylist: (id: string) => void;
   addPlaylist: (name: string, url: string, contentType: ContentType) => Promise<void>;
+  addLocalPlaylist: (name: string, m3uText: string, contentType: ContentType) => Promise<void>;
   removePlaylist: (id: string) => void;
   setSearchQuery: (q: string) => void;
   setSelectedGroup: (g: string | null) => void;
@@ -232,6 +237,12 @@ export function AppStateProvider({
 
   const switchPlaylistInternal = useCallback(async (source: PlaylistSource) => {
     dispatch({ type: "SWITCH_PLAYLIST_START", id: source.id });
+    if (source.origin === "local") {
+      // No URL to (re)fetch -- the channels were parsed once at add-time
+      // and live in localStorage instead.
+      dispatch({ type: "SWITCH_PLAYLIST_DONE", id: source.id, channels: loadLocalChannels<Channel>(source.id) });
+      return;
+    }
     try {
       const channels = await fetchPlaylistChannels(source.url);
       dispatch({ type: "SWITCH_PLAYLIST_DONE", id: source.id, channels });
@@ -356,6 +367,39 @@ export function AppStateProvider({
     [router, searchParams]
   );
 
+  // For playlists pasted/uploaded as raw M3U text instead of a URL: parsed
+  // once here, then persisted to localStorage since there's nothing to
+  // re-fetch from later.
+  const addLocalPlaylist = useCallback(
+    async (name: string, m3uText: string, contentType: ContentType) => {
+      const channels = parseM3U(m3uText);
+      if (channels.length === 0) {
+        throw new Error("No se encontraron canales válidos en el texto pegado.");
+      }
+      const trimmedName = name.trim() || "Lista pegada";
+      const id = makePlaylistId(trimmedName);
+      const source: PlaylistSource = {
+        id,
+        name: trimmedName,
+        url: "",
+        contentType,
+        origin: "local",
+      };
+      dispatch({ type: "ADD_PLAYLIST", playlist: source, channels });
+      saveLocalChannels(id, channels);
+      const next = [...loadStoredPlaylists().filter((p) => !p.isDefault), source];
+      saveStoredPlaylists(next);
+      saveActivePlaylistId(contentType, id);
+      const params = new URLSearchParams(searchParams.toString());
+      params.delete("channel");
+      params.set("list", id);
+      if (contentType === "tv") params.delete("section");
+      else params.set("section", contentType);
+      router.push(`/?${params.toString()}`, { scroll: false });
+    },
+    [router, searchParams]
+  );
+
   const removePlaylist = useCallback(
     (id: string) => {
       const removed = state.playlists.find((p) => p.id === id);
@@ -364,6 +408,8 @@ export function AppStateProvider({
         (p) => p.id !== id && p.contentType === section
       );
       const fallback = section === "tv" ? DEFAULT_PLAYLIST : (remainingInSection[0] ?? null);
+
+      if (removed?.origin === "local") removeLocalChannels(id);
 
       dispatch({ type: "REMOVE_PLAYLIST", id, fallbackId: fallback ? fallback.id : null });
 
@@ -409,6 +455,7 @@ export function AppStateProvider({
       selectedGroup: state.selectedGroup,
       switchPlaylist,
       addPlaylist,
+      addLocalPlaylist,
       removePlaylist,
       setSearchQuery,
       setSelectedGroup,
@@ -422,6 +469,7 @@ export function AppStateProvider({
     setSection,
     switchPlaylist,
     addPlaylist,
+    addLocalPlaylist,
     removePlaylist,
     setSearchQuery,
     setSelectedGroup,
