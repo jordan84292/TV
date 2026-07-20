@@ -58,11 +58,11 @@ function firstResourceUri(manifestText: string, manifestUrl: string): string | n
   }
 }
 
-// There's no proxy in front of playback anymore, so a channel only actually
-// plays if every hop hls.js would fetch -- master playlist, variant
-// playlist, and the first media segment -- is reachable, sends a permissive
-// Access-Control-Allow-Origin header, and isn't http:// on an https:// page
-// (mixed content, which browsers block outright regardless of CORS).
+// Mirrors exactly what the player will do (see VideoPlayer's
+// resolvePlaybackUrl): an http:// hop on an https:// deploy goes through our
+// same-origin proxy, so only its reachability matters, not its CORS headers
+// -- our server doesn't need permission from the origin the way a browser
+// fetch would. An https:// hop stays direct, so CORS still has to check out.
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get("url");
   if (!url) {
@@ -82,21 +82,20 @@ export async function GET(request: NextRequest) {
   let currentUrl = parsed.toString();
 
   for (let depth = 0; depth < MAX_DEPTH; depth++) {
-    if (pageIsSecure && new URL(currentUrl).protocol === "http:") {
-      return NextResponse.json({ ok: false, reason: "mixed-content" });
-    }
+    const willBeProxied = pageIsSecure && new URL(currentUrl).protocol === "http:";
 
     const wantBody = looksLikeManifest(currentUrl);
     const result = await probe(currentUrl, origin, wantBody);
 
-    if (!result.reachable || !result.corsOk) {
+    if (!result.reachable || (!willBeProxied && !result.corsOk)) {
       return NextResponse.json({ ok: false });
     }
 
     const body = result.body?.trim() ?? "";
     if (!wantBody || !body.startsWith("#EXTM3U")) {
       // Reached an actual media segment (or a manifest URL that didn't turn
-      // out to be one) that's reachable and CORS-permitted -- good enough.
+      // out to be one) that's reachable (and CORS-permitted, if it won't be
+      // proxied) -- good enough.
       return NextResponse.json({ ok: true });
     }
 

@@ -4,6 +4,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Hls, { ErrorData, Events, LevelSwitchedData } from "hls.js";
 import type { Channel } from "@/types/channel";
 
+// An http:// stream can never load from an https:// page -- browsers block
+// it as mixed content no matter what. Route only that case through our
+// same-origin proxy; https:// streams (the majority) stay direct so most
+// playback never touches our server.
+function resolvePlaybackUrl(url: string): string {
+  if (typeof window !== "undefined" && window.location.protocol === "https:" && url.startsWith("http://")) {
+    return `/api/stream?url=${encodeURIComponent(url)}`;
+  }
+  return url;
+}
+
 interface VideoPlayerProps {
   channel: Channel | null;
   onPickAnother: () => void;
@@ -51,7 +62,7 @@ export default function VideoPlayer({ channel, onPickAnother }: VideoPlayerProps
     const canPlayNative = video.canPlayType("application/vnd.apple.mpegurl");
 
     if (canPlayNative) {
-      video.src = channel.streamUrl;
+      video.src = resolvePlaybackUrl(channel.streamUrl);
       video.addEventListener(
         "loadedmetadata",
         () => {
@@ -100,7 +111,7 @@ export default function VideoPlayer({ channel, onPickAnother }: VideoPlayerProps
         }
       });
 
-      hls.loadSource(channel.streamUrl);
+      hls.loadSource(resolvePlaybackUrl(channel.streamUrl));
       hls.attachMedia(video);
     }
 
@@ -192,7 +203,7 @@ export default function VideoPlayer({ channel, onPickAnother }: VideoPlayerProps
     if (Hls.isSupported() && video) {
       const hls = new Hls({ capLevelToPlayerSize: true, startLevel: -1 });
       hlsRef.current = hls;
-      hls.loadSource(channel.streamUrl);
+      hls.loadSource(resolvePlaybackUrl(channel.streamUrl));
       hls.attachMedia(video);
       hls.on(Events.MANIFEST_PARSED, () => video.play().catch(() => undefined));
     }
